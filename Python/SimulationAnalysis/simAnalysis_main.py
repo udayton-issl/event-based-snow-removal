@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
     n_sec = int(3.6*1e6)
     resfile = open(RESULTS_SAVEFILE, "w", encoding="utf-8")
-    
+
     if run30:
         with DatReader(BASELINE_30MPH) as base_reader:
             with DatReader(SIMULATION_30MPH) as sim_reader:

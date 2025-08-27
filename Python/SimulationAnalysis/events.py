@@ -6,10 +6,10 @@ class Event2d:
     y: int
     p: int
     ts: int
-    
+
     def __hash__(self):
         return hash((self.x, self.y, self.ts))
-    
+
 @dataclass
 class EventExtTrigger:
     id: int

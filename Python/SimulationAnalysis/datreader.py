@@ -14,7 +14,7 @@ def _read_Event2d(datfile: BufferedReader, ts_offs: int) -> Event2d:
             ts=timestamp + ts_offs
         )
         return evt
-    
+
 def _read_EventExtTrigger(datfile: BufferedReader, ts_offs: int) -> EventExtTrigger:
     timestamp = int.from_bytes(datfile.read(EventFieldBytes.TIMESTAMP), byteorder="little")
     addr = int.from_bytes(datfile.read(EventFieldBytes.ADDR), byteorder="little")
@@ -28,12 +28,12 @@ def _read_EventExtTrigger(datfile: BufferedReader, ts_offs: int) -> EventExtTrig
 
 class DatReader:
     def __init__(self, fname: str) -> None:
-        self._datfile: BufferedReader = None
+        self._datfile: BufferedReader = None #type: ignore
         self._at_eof: bool = False
-        self._eof: int = None
-        self._read_single: Callable[[BufferedReader, int], Event2d | EventExtTrigger] = None
+        self._eof: int = None # type: ignore
+        self._read_single: Callable[[BufferedReader, int], Event2d | EventExtTrigger] = None # type: ignore
         self._ts_offs = 0
-        
+
         self._datfile = open(fname, "rb")
         self._eof, evtype = self._get_fileinfo()
         if evtype in [EventTypes.EVENT_2D, EventTypes.EVENT_CD]:
@@ -42,7 +42,7 @@ class DatReader:
             self._read_single = _read_EventExtTrigger
         else:
             raise ValueError(f"Unknown event type: {evtype}")
-        
+
     def __enter__(self):
         return self
 
@@ -55,7 +55,7 @@ class DatReader:
 
     def pos(self) -> int:
         return self._datfile.tell()
-    
+
     def set_pos(self, pos: int) -> None:
         self._datfile.seek(pos)
 
@@ -72,7 +72,7 @@ class DatReader:
 
     def finished(self) -> bool:
         return self._at_eof
-    
+
     def reset_read(self) -> None:
         self._datfile.seek(0)
 
@@ -90,7 +90,7 @@ class DatReader:
                 pass
             self._datfile.read(1)
             break
-        return eof, int.from_bytes(char)
+        return eof, int.from_bytes(char, byteorder="little")
 
     def _read_num(self, num_evts: int) -> list[Event2d | EventExtTrigger]:
         evts = []
@@ -101,7 +101,7 @@ class DatReader:
                 self._at_eof = True
                 break
         return evts
-    
+
     def _read_win(self, t_window: int) -> list[Event2d | EventExtTrigger]:
         evts = []
         evt = self._read_single(self._datfile, self._ts_offs)

@@ -58,12 +58,12 @@ def calc_threshold() -> list[float]:
 
 def get_timewidths(fname: str) -> np.ndarray:
     with h5py.File(fname, "r") as matfile:
-        ground_truth = np.array(matfile.get("groundTruth")[0])
-        spatial_win = np.array(matfile.get("tWidths_Window")[0])
-        no_ie = np.array(matfile.get("tWidths_noIE")[0])
-        no_lbl_prop = np.array(matfile.get("tWidths_noTE")[0])
-        per_pixel = np.array(matfile.get("tWidths_noWindow")[0])
-        adaptive_win = np.array(matfile.get("tWidths_smartWindow")[0])
+        ground_truth = np.array(matfile.get("groundTruth")[0])         # type: ignore
+        spatial_win = np.array(matfile.get("tWidths_Window")[0])       # type: ignore
+        no_ie = np.array(matfile.get("tWidths_noIE")[0])               # type: ignore
+        no_lbl_prop = np.array(matfile.get("tWidths_noTE")[0])         # type: ignore
+        per_pixel = np.array(matfile.get("tWidths_noWindow")[0])       # type: ignore
+        adaptive_win = np.array(matfile.get("tWidths_smartWindow")[0]) # type: ignore
     
     data = {
         "spatial_win" : spatial_win,

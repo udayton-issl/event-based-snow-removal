@@ -1,141 +1,230 @@
+import csv
+from enum import Enum
 import os
-import cv2
+from typing import Any, NamedTuple, Tuple
 import numpy as np
+from numpy.typing import NDArray
 import torch
-import metavision_sdk_ml
-import metavision_sdk_cv
-from skvideo.io import FFmpegWriter
 from metavision_sdk_ml import EventBbox
-from metavision_core.event_io import EventsIterator
+from metavision.core.event_io import EventsIterator
 from metavision_ml.detection_tracking import ObjectDetector
-from metavision_ml.detection_tracking import draw_detections_and_tracklets
-from metavision_sdk_core import BaseFrameGenerationAlgorithm
-from csv import writer
+
+MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Models")
+RED_EVENT_CUBE_PATH = os.path.join(MODELS_DIR, "red_event_cube_05_2020")
+RED_HISTOGRAM_PATH = os.path.join(MODELS_DIR, "red_histogram_05_2020")
+
+class CameraDims(NamedTuple):
+    width: int
+    height: int
+
+class FilterWindows(NamedTuple):
+    time_win: int
+    spatial_win: int
+
+class CNNType(Enum):
+    RED_EVENT_CUBE = RED_EVENT_CUBE_PATH
+    RED_HISTOGRAM = RED_HISTOGRAM_PATH
+
+###############################################################################
+# Data paths, replace with corresponding paths on your system
+EVENTS_FILEPATH = ""                # Raw events filepath
+OUTPUT_CSVPATH = ""                 # Results CSV filepath
+###############################################################################
+
+###############################################################################
+# Settings, replace desired values
+CAMERA_DIM_X = 1280                 # Camera resolution width
+CAMERA_DIM_Y = 720                  # Camera resolution height
+DELTA_T = 10000                     # Timestamp delta per iteration
+EBSNOR_SPATIAL_WINDOW = 0           # EBSnoR filter spatial window
+EBSNOR_TIME_WINDOW = 10000          # EBSnoR filter time window
+CNN_MODEL = CNNType.RED_EVENT_CUBE  # CNN model
+USE_ADAPTIVE_WIN = False            # Enable/Disable EBSnoR adaptive window
+###############################################################################
 
 
-class DetectionCNN():
-    def __init__(self, cam_dim=(1280, 720), cnn_type='hist', output_vid=None, csv=None):
-        (self.ev_width, self.ev_height) = cam_dim
-        self.OUTPUT_VIDEO = output_vid
+class DetectionCNN:
+    DOWNSCALE_FACTOR = 2
+    DETECTOR_SCORE_THRESHOLD = 0.4
+    IOU_THRESHOLD = 0.4
+    def __init__(self, dimensions: CameraDims, model: CNNType, output_csv: str) -> None:
+        detector = ObjectDetector(
+            model.value,
+            events_input_width=dimensions.width,
+            events_input_height=dimensions.height,
+            runtime="cuda" if torch.cuda.is_available() else "cpu",
+            network_input_width=torch.div(
+                dimensions.height,
+                self.DOWNSCALE_FACTOR,
+                rounding_mode="floor"
+            ),
+            network_input_height=torch.div(
+                dimensions.height,
+                self.DOWNSCALE_FACTOR,
+                rounding_mode="floor"
+            )
+        )
+        detector.set_detection_threshold(self.DETECTOR_SCORE_THRESHOLD)
+        detector.set_iou_threshold(self.IOU_THRESHOLD)
+        cd_processor = detector.get_cd_processor()
+        frame_buffer = cd_processor.init_output_tensor()
+        accumulation_time = detector.get_accumulation_time()
+        csvfile = open(output_csv, "w", newline="")
+        csvwriter = csv.writer(csvfile, delimiter=" ")
 
-        if cnn_type == 'cube':
-            self.NN_MODEL_DIRECTORY = os.path.abspath(os.path.join(os.getcwd(), "models", "red_event_cube_05_2020"))
-        else:
-            self.NN_MODEL_DIRECTORY = os.path.abspath(os.path.join(os.getcwd(), "models", "red_histogram_05_2020"))
 
-        self.DEVICE = "cpu" # 'cpu', 'cude' (or 'cuda:0','cuda:1', etc)
-        if torch.cuda.is_available():
-            self.DEVICE = "cuda"
+        self.accumulation_time = accumulation_time
+        self.cd_processor = cd_processor
+        self.detector = detector
+        self.frame_buffer = frame_buffer
+        self.csvfile = csvfile
+        self.csvwriter = csvwriter
 
-        self.NN_DOWNSCALE_FACTOR = 2
-        self.DETECTOR_SCORE_THRESHOLD = 0.4
-        self.NMS_IOU_THRESHOLD = 0.4
-
-        self.network_input_width = torch.div(self.ev_width, self.NN_DOWNSCALE_FACTOR, rounding_mode='floor')
-        self.network_input_height = torch.div(self.ev_height, self.NN_DOWNSCALE_FACTOR, rounding_mode='floor')
-
-        self.object_detector, self.cdproc, self.frame_buffer = self.__setup_detectors()
-
-        self.NN_accumulation_time = self.object_detector.get_accumulation_time()
-
-        self.VIDEO_WRITER = self.__init_output()
-
-        self.data_assoc = metavision_sdk_ml.DataAssociation(width=self.ev_width, height=self.ev_height, max_iou_inter_track=0.3)
-        self.data_assoc_buffer = self.data_assoc.get_empty_output_buffer()
-
-        if csv:
-            self.csv = open(csv, 'w', newline='')
-            self.csv_writer = writer(self.csv, delimiter=' ')
-        else:
-            self.csv = None
-            self.csv_writer = None
-
-    def __setup_detectors(self):
-        object_detector = ObjectDetector(self.NN_MODEL_DIRECTORY,
-                                         events_input_width=self.ev_width,
-                                         events_input_height=self.ev_height,
-                                         runtime=self.DEVICE,
-                                         network_input_width=self.network_input_width,
-                                         network_input_height=self.network_input_height,
-                                        )
-        object_detector.set_detection_threshold(self.DETECTOR_SCORE_THRESHOLD)
-        object_detector.set_iou_threshold(self.NMS_IOU_THRESHOLD)
-
-        cdproc = object_detector.get_cd_processor()
-        frame_buffer = cdproc.init_output_tensor()
-
-        if 'red_event_cube' in self.NN_MODEL_DIRECTORY:
-            assert frame_buffer.shape == (10, self.network_input_height, self.network_input_width)
-        else:
-            assert frame_buffer.shape == (2, self.network_input_height, self.network_input_width)
-        assert (frame_buffer == 0).all()
-
-        return object_detector, cdproc, frame_buffer
-
-    def __init_output(self):
-        if self.OUTPUT_VIDEO:
-            assert self.OUTPUT_VIDEO.lower().endswith(".mp4"), "Video should be mp4"
-        cv2.namedWindow("Detection and Tracking", cv2.WINDOW_NORMAL)
-
-        return FFmpegWriter(self.OUTPUT_VIDEO) if self.OUTPUT_VIDEO else None
-
-    def __generate_detections(self, ts, ev):
-        current_frame_start_ts = (torch.div((ts - 1), self.NN_accumulation_time, rounding_mode='floor')) * self.NN_accumulation_time
-        self.cdproc.process_events(current_frame_start_ts, ev, self.frame_buffer)
-
+    def run(self, events: Any, timestamp: Any) -> None:
+        start_ts = torch.div(timestamp - 1, self.accumulation_time, rounding_mode="floor")
+        start_ts *= self.accumulation_time
+        self.cd_processor.process_events(start_ts, events, self.frame_buffer)
         detections = np.empty(0, dtype=EventBbox)
 
-        if ts % self.NN_accumulation_time == 0:
-            detections = self.object_detector.process(ts, self.frame_buffer)
+        if timestamp % self.accumulation_time == 0:
+            detections = self.detector.process(timestamp, self.frame_buffer)
             self.frame_buffer.fill(0)
 
-        self.data_assoc.process_events(ts, ev, detections, self.data_assoc_buffer)
-        tracklets = self.data_assoc_buffer.numpy()
+        for detection in detections:
+            self._write_row_to_csv(detection)
 
-        return detections, tracklets
+    def _write_row_to_csv(self, detection: Any) -> None:
+        timestamp = detection[0]
+        xcoord = detection[1]
+        ycoord = detection[2]
+        width = detection[3]
+        height = detection[4]
+        class_id = detection[5]
+        track_id = detection[6]
+        confidence = detection[7]
 
-    def __generate_display(self, ts, ev, detections, tracklets):
-        frame = np.zeros((self.ev_height, self.ev_width*2, 3), dtype=np.uint8)
-        BaseFrameGenerationAlgorithm.generate_frame(ev, frame[:,:self.ev_width])
-        frame[:,:self.ev_width] = frame[:,:self.ev_width]
-        draw_detections_and_tracklets(ts=ts, frame=frame, width=self.ev_width, height=self.ev_height, detections=detections, tracklets=tracklets)
+        row = (timestamp, class_id, track_id, xcoord, ycoord, width, height, confidence)
+        self.csvwriter.writerow(row)
 
-        cv2.imshow('Detection and Tracking', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            return False
+class EBSnoRFilter:
+    def __init__(self, dimensions: CameraDims, windows: FilterWindows) -> None:
+        self.time_window = windows.time_win
+        self.spatial_window = windows.spatial_win
+        self.cam_x = dimensions.width
+        self.cam_y = dimensions.height
 
-        if self.OUTPUT_VIDEO:
-            self.VIDEO_WRITER.writeFrame(frame[...,::-1].astype(np.uint8))
-        return True
+    def ie_filter(
+        self,
+        events: Any,
+        time_window: int = 10000,
+        te_depth: int = 10
+    ) -> Tuple[NDArray[np.bool], NDArray[np.uint64]]:
+        datalen = len(events["t"])
+        ie_idx = np.zeros((self.cam_x, self.cam_y), dtype=int)
+        prev_ts = np.zeros((self.cam_x, self.cam_y), dtype=int)
+        prev_p = np.zeros((self.cam_x, self.cam_y), dtype=int)
+
+        is_ie = np.zeros(datalen, dtype=bool)
+        te_data = -1*np.ones((datalen, te_depth), dtype=int)
+        te_idx = np.zeros(datalen, dtype=int)
+
+        iter_ev = zip(events["x"], events["y"], events["p"], events["t"])
+        for idx, (xval, yval, pval, tval) in enumerate(iter_ev):
+            if pval != prev_p[xval][yval] or tval - prev_ts[xval][yval] > time_window:
+                is_ie[idx] = True
+                ie_idx[xval][yval] = idx
+            else:
+                if te_idx[ie_idx[xval][yval]] > te_depth:
+                    continue
+                te_data[ie_idx[xval][yval]][te_idx[xval][yval]] = idx
+                te_idx[ie_idx[xval][yval]] += 1
+            prev_ts[xval][yval] = tval
+            prev_p[xval][yval] = pval
+
+        return is_ie, te_data
+
+    def ebsnor_filter(
+        self,
+        events: Any,
+        is_ie: NDArray[np.bool],
+        te_data: NDArray[np.uint64],
+        adaptive_window: bool = False
+    ) -> NDArray[np.bool]:
+        datalen = len(events["t"])
+        events["x"] += self.spatial_window
+        events["y"] += self.spatial_window
+        pos_ts = -np.inf * np.ones(
+            (self.cam_x + 2 * self.spatial_window, self.cam_y + 2 * self.spatial_window),
+            dtype=int
+        )
+        pos_idx = np.zeros(
+            (self.cam_x + 2 * self.spatial_window, self.cam_y + 2 * self.spatial_window),
+            dtype=int
+        )
+        win = np.arange(-self.spatial_window, self.spatial_window + 1, dtype=int)
+        is_snow = np.zeros(datalen, dtype=bool)
+
+        iter_ev = zip(events["x"], events["y"], events["p"], events["t"])
+        for idx, (xval, yval, pval, tval) in enumerate(iter_ev):
+            if is_ie[idx] and pval < 0:
+                in_range = False
+                if adaptive_window:
+                    in_range = tval - pos_ts[xval][yval] < self.time_window
+                    positions = pos_idx[xval][yval]
+                if not in_range:
+                    in_range = np.less(tval - pos_ts[xval + win][yval + win], self.time_window)
+                    positions = pos_idx[xval + win][yval + win]
+                if in_range.any():
+                    is_snow[idx] = True
+                    te_idx = te_data[idx]
+                    is_snow[te_idx[te_idx > -1]] = True
+                    is_snow[positions[in_range]] = True # type: ignore
+                    te_idx = te_data[positions[in_range]] # type: ignore
+                    is_snow[te_idx[te_idx > 0]] = True
+            elif is_ie[idx]:
+                pos_idx[xval][yval] = idx
+                pos_ts[xval][yval] = idx
+
+        return is_snow
+
+    def process(self, events: Any, adaptive_window: bool = False) -> Any:
+        is_ie, te_data = self.ie_filter(events)
+        is_snow = self.ebsnor_filter(events, is_ie, te_data, adaptive_window)
+
+        new_length = len(events["t"]) - np.count_nonzero(is_snow)
+        new_x = events["x"][np.logical_not(is_snow)]
+        new_y = events["y"][np.logical_not(is_snow)]
+        new_t = events["t"][np.logical_not(is_snow)]
+        new_p = events["p"][np.logical_not(is_snow)]
+
+        events = np.resize(events, new_length)
+        events["x"] = new_x
+        events["y"] = new_y
+        events["t"] = new_t
+        events["p"] = new_p
+
+        return events
 
 
-    def __write_csv(self, box):
-        ts = box[0]
-        x = box[1]
-        y = box[2]
-        w = box[3]
-        h = box[4]
-        class_id = box[5]
-        track_id = box[6]
-        class_confidence = box[7]
+def main() -> None:
+    camera_dimensions = CameraDims(CAMERA_DIM_X, CAMERA_DIM_Y)
+    filter_windows = FilterWindows(EBSNOR_TIME_WINDOW, EBSNOR_SPATIAL_WINDOW)
+    preprocessor = EBSnoRFilter(camera_dimensions, filter_windows)
+    cnn = DetectionCNN(camera_dimensions, CNN_MODEL, OUTPUT_CSVPATH)
+    iter_evts = EventsIterator(
+        EVENTS_FILEPATH,
+        start_ts=0,
+        delta_t=DELTA_T,
+        relative_timestamps=False
+    )
 
-        csv_line = (ts, class_id, track_id, x, y, w, h, class_confidence)
+    idx = 0
+    for evts in iter_evts:
+        timestamp = iter_evts.get_current_time()
+        processed = preprocessor.process(evts, USE_ADAPTIVE_WIN)
+        cnn.run(processed, timestamp)
+        print(f"Iteration{idx} done. Timestamp={timestamp - DELTA_T}")
+        idx += 1
 
-        self.csv_writer.writerow(csv_line)
-
-    def end_display(self):
-        if self.OUTPUT_VIDEO:
-            self.VIDEO_WRITER.close()
-        cv2.destroyAllWindows()
-        self.csv.close()
-
-    def run_cnn(self, ev, ts):
-        detections, tracklets = self.__generate_detections(ts, ev)
-        if self.csv:
-            for box in detections:
-                self.__write_csv(box)
-
-        #if not self.__generate_display(ts, ev, detections, tracklets):
-          #  return True
-
-        return False
+if __name__ == "__main__":
+    main()

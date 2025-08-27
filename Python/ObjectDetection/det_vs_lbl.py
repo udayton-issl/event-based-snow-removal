@@ -1,161 +1,104 @@
+from __future__ import annotations
+from dataclasses import dataclass
+import os
+from typing import List, NamedTuple, Optional, Tuple
+
 import csv
 import cv2
 
-from os import listdir
-from os.path import isfile
+###############################################################################
+# Data paths, replace with corresponding paths on your system
+DETECTIONS_SNOW_CSV: str = ""       # Detections w/ snow CSV filepath
+DETECTIONS_NOSNOW_CSV: str = ""     # Detections w/o snow CSV filepath
+BOUNDING_BOX_LABELS_CSV: str = ""   # Labels CSV filepath
+IMAGE_DIR: str = ""                 # Video frames directory path
+SAVE_DIR: str = ""                  # Annotated frames save directory path
+###############################################################################
 
-DETECTION_CSV_SNOW = ""
-DETECTION_CSV_NOSNOW = ""
-IMG_DIRECTORY = ""
-SAVE_DIRECTORY = ""
-LABEL_CSV = ""
+###############################################################################
+# Settings, replace desired values
+LABEL_WINDOW: int = 0               # Labels time window (+/- value)
+DETECTION_WINDOW: int = 50000       # Detections time window (+/- value)
+###############################################################################
 
-detection_snow_dict = {}
-detection_nosnow_dict = {}
-label_dict = {}
-imgs = []
-lbl_list = []
-prev_ts = 0
+@dataclass(init=False, frozen=True)
+class BoxColors:
+    BLUE: Tuple[float, float, float] = (255.0, 0.0, 0.0)
+    GREEN: Tuple[float, float, float] = (0.0, 255.0, 0.0)
+    RED: Tuple[float, float, float] = (0.0, 0.0, 255.0)
 
-imgs = listdir(IMG_DIRECTORY)
+class BoundingBox(NamedTuple):
+    timestamp: int
+    xcoord: int
+    ycoord: int
+    width: int
+    height: int
 
+    @staticmethod
+    def from_csv_data(data: List[str], is_label: bool) -> BoundingBox:
+        if is_label:
+            return BoundingBox(
+                timestamp=round(float(data[0])),
+                xcoord=max(0, round(float(data[1]))),
+                ycoord=max(0, round(float(data[2]))),
+                width=round(float(data[3])),
+                height=round(float(data[4]))
+            )
+        return BoundingBox(
+            timestamp=round(float(data[0])),
+            xcoord=max(0, round(float(data[3]))),
+            ycoord=max(0, round(float(data[4]))),
+            width=round(float(data[5])),
+            height=round(float(data[6]))
+        )
 
-with open(DETECTION_CSV_SNOW, 'r') as f:
-    detect_reader = csv.reader(f, delimiter=' ')
+def read_csvfile(csvpath: str, is_label: bool = False) -> List[BoundingBox]:
+    data = []
+    with open(csvpath, "r") as csvfile:
+        reader = csv.reader(csvfile, delimiter=" ")
+        for row in reader:
+            data.append(BoundingBox.from_csv_data(row, is_label))
+    return data
 
-    for idx, row in enumerate(detect_reader):
-        if float(row[3]) < 0:
-            row[3] = '0'
-
-        if float(row[4]) < 0:
-            row[4] = '0'
-
-        for i in range(len(row)):
-            row[i] = int(round(float(row[i])))
-
-        detection_snow_dict[idx] = row
-
-
-with open(DETECTION_CSV_NOSNOW, 'r') as f:
-    detect_reader = csv.reader(f, delimiter=' ')
-
-    for idx, row in enumerate(detect_reader):
-        if float(row[3]) < 0:
-            row[3] = '0'
-
-        if float(row[4]) < 0:
-            row[4] = '0'
-
-        for i in range(len(row)):
-            row[i] = int(round(float(row[i])))
-
-        detection_nosnow_dict[idx] = row
-
-print("======================LABELS=====================")
-with open(LABEL_CSV, 'r') as f:
-    label_reader = csv.reader(f, delimiter=' ')
-
-    for idx, row in enumerate(label_reader):
-        if float(row[1]) < 0:
-            row[3] = '0'
-
-        if float(row[2]) < 0:
-            row[4] = '0'
-
-        for i in range(len(row)):
-            row[i] = int(round(float(row[i])))
-
-        label_dict[idx] = row
-
-
-for idx in range(len(label_dict.keys())):
-    ts = label_dict[idx][0]
-    lbl_list.append(label_dict[idx])
-
-    if idx + 1 < len(label_dict.keys()):
-        if label_dict[idx+1][0] == ts:
-            continue
-
+def get_image_filename(imgs: List[str], timestamp: int, win: int) -> Optional[str]:
+    segment_lower = f"_{timestamp - win}"
+    segment_upper = f"_{timestamp + win}"
     for img in imgs:
-        if '_' + str(ts) in img:
-            print(img)
-            print(ts)
-            img_f = cv2.imread(IMG_DIRECTORY + '\\' + img)
+        if segment_lower in img or segment_upper in img:
+            return img
+    return None
 
-            for lbl in lbl_list:
-                cv2.rectangle(img_f, (lbl[1], lbl[2]), (lbl[1] + lbl[3], lbl[2] + lbl[4]), (255, 0, 0), 2)
-
-            break
-
-
-    lbl_list = []
-    cv2.imwrite(SAVE_DIRECTORY + '\\' + img, img_f)
-print("======================SNOW=====================")
-
-for idx in range(len(detection_snow_dict.keys())):
-    ts = detection_snow_dict[idx][0]
-    lbl_list.append(detection_snow_dict[idx])
-
-    if idx + 1 < len(detection_snow_dict.keys()):
-        if detection_snow_dict[idx+1][0] == ts:
+def draw_boxes(
+    boxes: List[BoundingBox],
+    imgdir: str,
+    savedir: str,
+    window: int,
+    color: Tuple[float, float, float]
+) -> None:
+    imglist = os.listdir(imgdir)
+    for box in boxes:
+        imgfile = get_image_filename(imglist, box.timestamp, window)
+        if imgfile is None:
             continue
+        imgpath = os.path.join(imgdir, imgfile)
+        savepath = os.path.join(savedir, imgfile)
+        if os.path.isfile(savepath):
+            imgpath = savepath
+        img = cv2.imread(imgpath)
+        if img is not None:
+            pt1 = (box.xcoord, box.ycoord)
+            pt2 = (box.xcoord + box.width, box.ycoord + box.height)
+            cv2.rectangle(img, pt1, pt2, color, thickness=2)
+            cv2.imwrite(savepath, img)
 
-    for img in imgs:
-        if '_' + str(ts - 50000) in img or '_' + str(ts - 50000) in img:
-            print(img)
-            print(ts)
+def main() -> None:
+    detections_snow = read_csvfile(DETECTIONS_SNOW_CSV)
+    detections_nosnow = read_csvfile(DETECTIONS_NOSNOW_CSV)
+    labels = read_csvfile(BOUNDING_BOX_LABELS_CSV, is_label=True)
 
-            if isfile(SAVE_DIRECTORY + '\\' + img):
-                img_f = cv2.imread(SAVE_DIRECTORY + '\\' + img)
-            else:
-                img_f = cv2.imread(IMG_DIRECTORY + '\\' + img)
+    draw_boxes(labels, IMAGE_DIR, SAVE_DIR, LABEL_WINDOW, BoxColors.BLUE)
+    draw_boxes(detections_snow, IMAGE_DIR, SAVE_DIR, DETECTION_WINDOW, BoxColors.GREEN)
+    draw_boxes(detections_nosnow, IMAGE_DIR, SAVE_DIR, DETECTION_WINDOW, BoxColors.RED)
 
-            for lbl in lbl_list:
-                for det in detection_snow_dict:
-                    if ts - 50000 <= detection_snow_dict[det][0] and ts + 50000 >= detection_snow_dict[det][0]:
-                        cv2.rectangle(img_f, (detection_snow_dict[det][3], detection_snow_dict[det][4]), (detection_snow_dict[det][3] + detection_snow_dict[det][5], detection_snow_dict[det][4] + detection_snow_dict[det][6]), (0, 255, 0), 2)
-
-            break
-
-
-    lbl_list = []
-    cv2.imwrite(SAVE_DIRECTORY + '\\' + img, img_f)
-print("======================NO SNOW=====================")
-
-for idx in range(len(detection_nosnow_dict.keys())):
-    ts = detection_nosnow_dict[idx][0]
-    lbl_list.append(detection_nosnow_dict[idx])
-
-    if idx + 1 < len(detection_nosnow_dict.keys()):
-        if detection_nosnow_dict[idx+1][0] == ts:
-            continue
-
-    for img in imgs:
-        if '_' + str(ts - 50000) in img or '_' + str(ts - 50000) in img:
-            print(img)
-            print(ts)
-
-            if isfile(SAVE_DIRECTORY + '\\' + img):
-                img_f = cv2.imread(SAVE_DIRECTORY + '\\' + img)
-            else:
-                img_f = cv2.imread(IMG_DIRECTORY + '\\' + img)
-
-            for lbl in lbl_list:
-                for det in detection_nosnow_dict:
-                    if ts - 50000 <= detection_nosnow_dict[det][0] and ts + 50000 >= detection_nosnow_dict[det][0]:
-                        cv2.rectangle(img_f, (detection_nosnow_dict[det][3], detection_nosnow_dict[det][4]), (detection_nosnow_dict[det][3] + detection_nosnow_dict[det][5], detection_nosnow_dict[det][4] + detection_nosnow_dict[det][6]), (0, 0, 255), 2)
-
-            break
-
-
-    lbl_list = []
-    cv2.imwrite(SAVE_DIRECTORY + '\\' + img, img_f)
-
-
-saved_imgs =  listdir(SAVE_DIRECTORY)
-for img in saved_imgs:
-    img_f = cv2.imread(SAVE_DIRECTORY + '\\' + img)
-
-    cv2.imshow('image', img_f)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()

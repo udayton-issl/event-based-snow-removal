@@ -1,210 +1,177 @@
+from __future__ import annotations
 import csv
+from typing import List, NamedTuple, Tuple
 
-def metrics_calculation(b1, b2):
-    intersection = intersection_calc(b1, b2)
-    union = union_calc(intersection, b1, b2)
+###############################################################################
+# Data paths, replace with corresponding paths on your system
+DETECTIONS_SNOW_CSV = ""            # Detections w/ snow CSV filepath
+DETECTIONS_NOSNOW_CSV = ""          # Detections w/o snow CSV filepath
+BOUNDING_BOX_LABELS_CSV = ""        # Labels CSV filepath
+OUTPUT_FILE = ""                    # Save file path
+###############################################################################
 
-    percent_overlap = intersection / (b2['w']*b2['h'])
-    iou = intersection / union
+###############################################################################
+# Settings, replace desired values
+MATCH_VALUE = 0                     # IOU threshold for valid detections
+FRAMES = 20                         # Maximum number of frames to analyze
+TIME_PER_FRAME = 50000              # Frame duration in uS
+SECONDS_IN_VIDEO = 153              # Total number of sequence in video
+###############################################################################
 
-    return percent_overlap, iou
+class AnalysisResults:
+    def __init__(self, num_labels: int) -> None:
+        self.num_labels: int = num_labels
+        self.true_positive: int = 0
+        self.false_positive: int = 0
+        self.running_percent_overlap: float = 0
+        self.running_iou: float = 0
 
-def intersection_calc(b1, b2):
-    dx = max(min(b1['x'] + b1['w'], b2['x'] + b2['w']) - max(b1['x'], b2['x']), 0)
-    dy = max(min(b1['y'] + b1['h'], b2['y'] + b2['h']) - max(b1['y'], b2['y']), 0)
+    def percent_overlap(self) -> float:
+        return self.running_percent_overlap / (self.true_positive + self.false_positive)
 
-    return dx*dy
+    def intersection_over_union(self) -> float:
+        return self.running_iou / (self.true_positive + self.false_positive)
 
-def union_calc(intersection, b1, b2):
-    b1_area =  b1['w']*b1['h']
-    b2_area = b2['w']*b2['h']
+    def precision(self) -> float:
+        return self.true_positive / (self.true_positive + self.false_positive)
 
-    return (b1_area + b2_area) - intersection
+    def recall(self) -> float:
+        return self.true_positive / self.num_labels
 
-DETECTION_NS_CSV = ""
-DETECTION_S_CSV = ""
-LABEL_CSV = ""
-FINAL_NUMBERS_TEXT = ""
-MATCH_VALUE = 0
-FRAMES = 20
+class BoundingBox(NamedTuple):
+    timestamp: int
+    xcoord: int
+    ycoord: int
+    width: int
+    height: int
 
-TIME_PER_FRAME = 50000
-SECONDS_IN_VIDEO = 153
+    @staticmethod
+    def from_csv_data(data: List[str], is_label: bool) -> BoundingBox:
+        if is_label:
+            return BoundingBox(
+                timestamp=round(float(data[0])),
+                xcoord=max(0, round(float(data[1]))),
+                ycoord=max(0, round(float(data[2]))),
+                width=round(float(data[3])),
+                height=round(float(data[4]))
+            )
+        return BoundingBox(
+            timestamp=round(float(data[0])),
+            xcoord=max(0, round(float(data[3]))),
+            ycoord=max(0, round(float(data[4]))),
+            width=round(float(data[5])),
+            height=round(float(data[6]))
+        )
 
+def read_csvfile(csvpath: str, is_label: bool = False) -> List[BoundingBox]:
+    data = []
+    with open(csvpath, "r") as csvfile:
+        reader = csv.reader(csvfile, delimiter=" ")
+        for row in reader:
+            data.append(BoundingBox.from_csv_data(row, is_label))
+    return data
 
-for frame in range(1, FRAMES+1):
-    detection_ns_dict = {}
-    detection_s_dict = {}
-    label_dict = {}
-    with open(DETECTION_NS_CSV, 'r') as f:
-        detect_ns_reader = csv.reader(f, delimiter=' ')
+def calculate_intersection(box1: BoundingBox, box2: BoundingBox) -> int:
+    val_x0 = max(box1.xcoord, box2.xcoord)
+    val_x1 = min(box1.xcoord + box1.width, box2.xcoord + box2.width)
+    val_y0 = max(box1.ycoord, box2.ycoord)
+    val_y1 = min(box1.ycoord + box1.height, box2.ycoord + box2.height)
 
-        for idx, row in enumerate(detect_ns_reader):
-            if float(row[3]) < 0:
-                row[3] = '0'
+    return max(0, val_x1 - val_x0) * max(0, val_y1 - val_y0)
 
-            if float(row[4]) < 0:
-                row[4] = '0'
+def calculate_union(box1: BoundingBox, box2: BoundingBox, intersection: int) -> int:
+    box1_area = box1.width * box1.height
+    box2_area = box2.width * box2.height
 
-            for i in range(len(row)):
-                row[i] = int(round(float(row[i])))
+    return (box1_area + box2_area) - intersection
 
-            detection_ns_dict[idx] = row
+def calculate_metrics(detection: BoundingBox, label: BoundingBox) -> Tuple[float, float]:
+    intersection = calculate_intersection(detection, label)
+    union = calculate_union(detection, label, intersection)
 
-    with open(DETECTION_S_CSV, 'r') as f:
-        detect_s_reader = csv.reader(f, delimiter=' ')
+    percent_overlap = intersection / (label.width * label.height)
+    intersection_over_union = intersection / union
 
-        for idx, row in enumerate(detect_s_reader):
-            if float(row[1]) < 0:
-                row[3] = '0'
+    return percent_overlap, intersection_over_union
 
-            if float(row[2]) < 0:
-                row[4] = '0'
-
-            for i in range(len(row)):
-                row[i] = int(round(float(row[i])))
-
-            detection_s_dict[idx] = row
-
-
-    with open(LABEL_CSV, 'r') as f:
-        label_reader = csv.reader(f, delimiter=' ')
-
-        for idx, row in enumerate(label_reader):
-            if float(row[1]) < 0:
-                row[3] = '0'
-
-            if float(row[2]) < 0:
-                row[4] = '0'
-
-            for i in range(len(row)):
-                row[i] = int(round(float(row[i])))
-
-            row.append(False)
-            row.append(False)
-
-            label_dict[idx] = row
-
-    running_percentage_s = 0
-    running_iou_s = 0
-    running_percentage_ns = 0
-    running_iou_ns = 0
-    true_positive_s = 0
-    detection_found_s = 0
-    false_positive_s = 0
-    true_positive_ns = 0
-    detection_found_ns = 0
-    false_positive_ns = 0
-
-    for second in range(SECONDS_IN_VIDEO + 1):
-        detections_ns = []
-        detections_s = []
-        labels = []
-        for box in detection_ns_dict:
-            ts = detection_ns_dict[box][0]
-            if ts >= second*1000000 - frame*TIME_PER_FRAME and ts < second*1000000 + frame*TIME_PER_FRAME:
-                detections_ns.append(box)
-
-        for box in detection_s_dict:
-            ts = detection_s_dict[box][0]
-            if ts >= second*1000000 - frame*TIME_PER_FRAME and ts < second*1000000 + frame*TIME_PER_FRAME:
-                detections_s.append(box)
-
-        for label in label_dict:
-            ts = label_dict[label][0]
-            if ts >= second*1000000 - frame*TIME_PER_FRAME and ts < second*1000000 + frame*TIME_PER_FRAME:
-                labels.append(label)
-
-        for box in detections_ns:
-            d_ts = detection_ns_dict[box][0]
-            d_x = detection_ns_dict[box][3]
-            d_y = detection_ns_dict[box][4]
-            d_w = detection_ns_dict[box][5]
-            d_h = detection_ns_dict[box][6]
-
+def analyze_frame_set(
+    frame_window: int,
+    detections: List[BoundingBox],
+    labels: List[BoundingBox],
+    total_seconds: int,
+    threshold: int
+) -> AnalysisResults:
+    results = AnalysisResults(len(labels))
+    for second in range(total_seconds + 1):
+        lims = ((second * 1e6) - frame_window, (second * 1e6) + frame_window)
+        frame_detections = [x for x in detections if lims[0] <= x.timestamp < lims[1]]
+        frame_labels = [x for x in labels if lims[0] <= x.timestamp < lims[1]]
+        matched = [False for _ in labels]
+        for detection in frame_detections:
             valid = False
-
-            for label in labels:
-                l_ts = label_dict[label][0]
-                l_x = label_dict[label][1]
-                l_y = label_dict[label][2]
-                l_w = label_dict[label][3]
-                l_h = label_dict[label][4]
-
-                percent_overshoot, iou = metrics_calculation({'x': d_x, 'y': d_y, 'w': d_w, 'h':d_h}, {'x': l_x, 'y': l_y, 'w': l_w, 'h': l_h})
-
-                if iou > MATCH_VALUE:
+            for idx, label in enumerate(frame_labels):
+                percent_overlap, iou = calculate_metrics(detection, label)
+                if iou > threshold:
                     valid = True
-                    if not label_dict[label][5]:
-                        label_dict[label][5] = True
-                        true_positive_ns += 1
-                        running_percentage_ns += percent_overshoot
-                        running_iou_ns += iou
+                    if not matched[idx]:
+                        matched[idx] = True
+                        results.true_positive += 1
+                        results.running_percent_overlap += percent_overlap
+                        results.running_iou += iou
                     break
-
             if not valid:
-                false_positive_ns += 1/frame
-                #if frame == FRAMES:
-                 #   print(detection_ns_dict[box])
+                results.false_positive += 1
 
+    return results
 
-        for box in detections_s:
-            d_ts = detection_s_dict[box][0]
-            d_x = detection_s_dict[box][3]
-            d_y = detection_s_dict[box][4]
-            d_w = detection_s_dict[box][5]
-            d_h = detection_s_dict[box][6]
+def write_results(
+    filename: str,
+    num_frames: int,
+    results_snow: AnalysisResults,
+    results_nosnow: AnalysisResults
+) -> None:
+    text = [
+        f"----------{num_frames}----------",
+        "NO SNOW",
+        f"    Avg Percent Overlap: {results_nosnow.percent_overlap() * 100}%",
+        f"    Avg IOU: {results_nosnow.intersection_over_union() * 100}%",
+        f"    Precision: {results_nosnow.precision()}",
+        f"    Recall: {results_nosnow.recall()}",
+        f"    Cars Found: {results_nosnow.true_positive}/{results_nosnow.num_labels}",
+        f"    False Positives: {results_nosnow.false_positive}",
+        "",
+        "SNOW",
+        f"    Avg Percent Overlap: {results_snow.percent_overlap() * 100}%",
+        f"    Avg IOU: {results_snow.intersection_over_union() * 100}%",
+        f"    Precision: {results_snow.precision()}",
+        f"    Recall: {results_snow.recall()}",
+        f"    Cars Found: {results_snow.true_positive}/{results_snow.num_labels}",
+        f"    False Positives: {results_snow.false_positive}",
+        "\n",
+    ]
+    with open(filename, "a", encoding="utf-8") as results_file:
+        results_file.write("\n".join(text))
 
-            valid = False
+def main() -> None:
+    detections_snow = read_csvfile(DETECTIONS_SNOW_CSV)
+    detections_nosnow = read_csvfile(DETECTIONS_NOSNOW_CSV)
+    labels = read_csvfile(BOUNDING_BOX_LABELS_CSV, is_label=True)
+    for num_frames in range(1, FRAMES + 1):
+        results_snow = analyze_frame_set(
+            num_frames * TIME_PER_FRAME,
+            detections_snow,
+            labels,
+            SECONDS_IN_VIDEO,
+            MATCH_VALUE
+        )
+        results_nosnow = analyze_frame_set(
+            num_frames * TIME_PER_FRAME,
+            detections_nosnow,
+            labels,
+            SECONDS_IN_VIDEO,
+            MATCH_VALUE
+        )
+        write_results(OUTPUT_FILE, num_frames, results_snow, results_nosnow)
 
-            for label in labels:
-                l_ts = label_dict[label][0]
-                l_x = label_dict[label][1]
-                l_y = label_dict[label][2]
-                l_w = label_dict[label][3]
-                l_h = label_dict[label][4]
-
-                percent_overshoot, iou = metrics_calculation({'x': d_x, 'y': d_y, 'w': d_w, 'h':d_h}, {'x': l_x, 'y': l_y, 'w': l_w, 'h': l_h})
-
-                if iou > MATCH_VALUE:
-                    valid = True
-                    if not label_dict[label][6]:
-                        label_dict[label][6] = True
-                        true_positive_s += 1
-                        running_percentage_s += percent_overshoot
-                        running_iou_s += iou
-                    break
-
-            if not valid:
-                false_positive_s += 1/frame
-
-
-    avg_percent_ns = running_percentage_ns/(true_positive_ns + false_positive_ns)
-    avg_iou_ns = running_iou_ns/(true_positive_ns + false_positive_ns)
-    precision_ns = true_positive_ns/(true_positive_ns + false_positive_ns)
-    recall_ns = true_positive_ns/len(label_dict.keys())
-
-    avg_percent_s = running_percentage_s/(true_positive_s + false_positive_s)
-    avg_iou_s = running_iou_s/(true_positive_s + false_positive_s)
-    precision_s = true_positive_s/(true_positive_s + false_positive_s)
-    recall_s = true_positive_s/len(label_dict.keys())
-
-
-    with open(FINAL_NUMBERS_TEXT, 'a') as f:
-        f.write('----------' + str(frame) + '----------\n')
-        f.write('NO SNOW \n')
-        f.writelines('Avg Percent Overlap: ' + str(avg_percent_ns*100) + '%\n')
-        f.writelines('Avg IOU: ' + str(avg_iou_ns*100) + '%\n')
-        f.writelines('Precision: ' + str(precision_ns) + '\n')
-        f.writelines('Recall: ' + str(recall_ns) + '\n')
-        f.writelines('Number of cars found: ' + str(true_positive_ns) + '/' + str(len(label_dict.keys())) + '\n')
-        f.writelines('Number of misfires: ' + str(false_positive_ns) + '\n\n')
-
-        f.write('SNOW \n')
-        f.writelines('Avg Percent Overlap: ' + str(avg_percent_s*100) + '%\n')
-        f.writelines('Avg IOU: ' + str(avg_iou_s*100) + '%\n')
-        f.writelines('Precision: ' + str(precision_s) + '\n')
-        f.writelines('Recall: ' + str(recall_s) + '\n')
-        f.writelines('Number of cars found: ' + str(true_positive_s) + '/' + str(len(label_dict.keys())) + '\n')
-        f.writelines('Number of misfires: ' + str(false_positive_s) + '\n\n')
-        f.write('\n')
+if __name__ == "__main__":
+    main()
