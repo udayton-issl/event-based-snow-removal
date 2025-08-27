@@ -66,3 +66,7 @@ python3 simAnalysis_main.py
 ```
 
 ***Note:** Performing simulation analysis requires pre-processed data in MATLAB output format*
+
+## Metavision SDK
+
+Installation instructions for the Metavision SDK can be found [here](https://docs.prophesee.ai/stable/installation/index.html). Our object detection scripts support both the `red_event_cube_05_2020` and `red_histogram_05_2020` CNN models. To run object detection, be sure to copy these model to the `ObjectDetection/Models` directory.
